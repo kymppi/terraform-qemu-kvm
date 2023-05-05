@@ -1,40 +1,49 @@
 # Defining VM Volume
-resource "libvirt_volume" "debian11-terraform-qcow2" {
+resource "libvirt_volume" "debian11-qcow2" {
   name   = "debian11.qcow2"
-  pool   = "default" # List storage pools using virsh pool-list
+  pool   = var.libvirt_image_pool
   source = "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
   format = "qcow2"
 }
 
+resource "libvirt_volume" "kubernetes-master" {
+  name           = "kubernetes-master-${count.index}.qcow2"
+  base_volume_id = libvirt_volume.debian11-qcow2.id
+  count          = var.kubernetes_master.count
+}
+
 # get user data info
-data "template_file" "user_data" {
+data "template_file" "kubernetes_master_cloud_init" {
   template = file("${path.module}/cloud_init.cfg")
 }
 
 # Use CloudInit to add the instance
-resource "libvirt_cloudinit_disk" "commoninit" {
-  name      = "commoninit.iso"
-  pool      = "default" # List storage pools using virsh pool-list
-  user_data = data.template_file.user_data.rendered
+resource "libvirt_cloudinit_disk" "kubernetes_master_common_init" {
+  name      = "kubernetes_master_common_init-${count.index}.iso"
+  pool      = var.libvirt_image_pool
+  user_data = data.template_file.kubernetes_master_cloud_init.rendered
+  count     = var.kubernetes_master.count
 }
 
-# Define KVM domain to create
-resource "libvirt_domain" "debian11-terraform" {
-  name   = "debian11-terraform"
+resource "libvirt_domain" "kubernetes-master" {
+  count = var.kubernetes_master.count
+
+  name   = "kubernetes_master-${count.index}"
   memory = "2048"
   vcpu   = 2
 
   network_interface {
     network_name   = "default" # List networks with virsh net-list
-    hostname       = "debian11-terraform-1"
+    hostname       = "kubernetes_master-${count.index}"
     wait_for_lease = true
+    addresses      = [var.kubernetes_master.ips[count.index]]
   }
 
   disk {
-    volume_id = libvirt_volume.debian11-terraform-qcow2.id
+    volume_id = libvirt_volume.kubernetes-master[count.index].id
   }
 
-  cloudinit = libvirt_cloudinit_disk.commoninit.id
+  cloudinit = libvirt_cloudinit_disk.kubernetes_master_common_init[count.index].id
 
   console {
     type        = "pty"
@@ -49,7 +58,10 @@ resource "libvirt_domain" "debian11-terraform" {
   }
 }
 
-# Output Server IP
-output "ip" {
-  value = libvirt_domain.debian11-terraform.network_interface.0.addresses.0
+# Output Kubernetes Master IPs next to the VM names
+output "kubernetes_master_ips" {
+  value = {
+    for vm in libvirt_domain.kubernetes-master :
+    vm.name => vm.network_interface.0.addresses.0
+  }
 }
